@@ -12,6 +12,7 @@ from PIL import Image
 from numpy.lib.stride_tricks import sliding_window_view
 
 import pyglet
+from pyglet.image import ImageData
 from pyglet.gl import (
     GL_COLOR_BUFFER_BIT,
     GL_DEPTH_BUFFER_BIT,
@@ -60,6 +61,9 @@ class MeshData:
     board_ref_raw: float
 
 
+DEBUG_TEXTURE_MODES = ("texture", "height", "board", "pot")
+
+
 def choose_texture(sample: Sample, use_ac: bool) -> Path:
     texture_path = sample.ac_jpg if use_ac and sample.ac_jpg else sample.jpg or sample.ac_jpg
     if texture_path is None:
@@ -100,6 +104,19 @@ def read_ptt(path: Path) -> tuple[int, int, float, float, np.ndarray]:
     return width, height, pitch_x, pitch_y, planes
 
 
+def read_pot(path: Path) -> tuple[int, int, np.ndarray] | None:
+    if not path.exists():
+        return None
+    data = path.read_bytes()
+    width_f, height_f, *_ = struct.unpack_from("<5f", data, 0)
+    width, height = int(width_f), int(height_f)
+    expected = width * height * 5
+    if len(data) - 20 != expected:
+        return None
+    planes = np.frombuffer(data, dtype=np.uint8, offset=20).reshape(5, height, width)
+    return width, height, planes
+
+
 def read_header_uv_x(path: Path, width: int) -> float:
     data = path.read_bytes()
     # Bytes 32..75 are 11 packed signed int16 pairs. The first value tracks the
@@ -132,6 +149,17 @@ def colorize_depth(gray: np.ndarray) -> np.ndarray:
     rgb[..., 1] = np.clip((1.0 - np.abs(g - 0.52) / 0.52) * 235, 0, 235).astype(np.uint8)
     rgb[..., 2] = np.clip((1.15 - g * 1.45) * 255, 0, 255).astype(np.uint8)
     return rgb
+
+
+def normalize_to_u8(values: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+    values_f = values.astype(np.float32)
+    src = values_f[mask] if mask is not None and mask.any() else values_f[np.isfinite(values_f)]
+    if src.size == 0:
+        return np.zeros(values.shape, dtype=np.uint8)
+    low, high = np.percentile(src, [1, 99])
+    if high <= low:
+        high = low + 1.0
+    return np.clip((values_f - low) / (high - low) * 255.0, 0, 255).astype(np.uint8)
 
 
 def export_depth_files(sample: Sample, output_dir: Path, invert: bool) -> list[Path]:
@@ -211,6 +239,40 @@ def build_board_mask(texture_path: Path, size: tuple[int, int], strict: bool = F
     if strict:
         return (g > r * 1.18) & (g > b * 1.18) & (g > 40.0) & (((r + b) * 0.5) < g * 0.78)
     return (g > r * 1.08) & (g > b * 1.08) & (g > 32.0)
+
+
+def make_debug_texture(sample: Sample, texture_path: Path, mode: str) -> Image.Image:
+    width, height, _pitch_x, _pitch_y, planes = read_ptt(sample.ptt)
+    if mode == "height":
+        raw = planes[0].astype(np.float32)
+        mask = raw < 60000
+        gray = normalize_to_u8(raw, mask)
+        gray[~mask] = 0
+        return Image.fromarray(colorize_depth(gray), mode="RGB")
+
+    if mode == "board":
+        base = np.asarray(Image.open(texture_path).convert("RGB"), dtype=np.float32)
+        strict = build_board_mask(texture_path, (width, height), strict=True)
+        loose = build_board_mask(texture_path, (width, height), strict=False)
+        overlay = base.copy()
+        overlay[loose & ~strict] = overlay[loose & ~strict] * 0.35 + np.array([30, 90, 255]) * 0.65
+        overlay[strict] = overlay[strict] * 0.35 + np.array([30, 220, 60]) * 0.65
+        return Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8), mode="RGB")
+
+    if mode == "pot":
+        pot = read_pot(sample.ptt.with_suffix(".pot"))
+        if pot is not None:
+            _pot_w, _pot_h, pot_planes = pot
+            rgb = np.dstack([pot_planes[0], pot_planes[2], pot_planes[4]]).astype(np.uint8)
+            return Image.fromarray(rgb, mode="RGB")
+
+    return Image.open(texture_path).convert("RGB")
+
+
+def image_to_texture(image: Image.Image):
+    rgba = image.convert("RGBA")
+    data = rgba.tobytes()
+    return ImageData(rgba.width, rgba.height, "RGBA", data, pitch=-rgba.width * 4).get_texture()
 
 
 def estimate_board_reference_from_texture(raw: np.ndarray, mask: np.ndarray, texture_path: Path) -> float:
@@ -473,6 +535,7 @@ class GLViewer(pyglet.window.Window):
         self.visual_z = visual_z
         self.index = 0
         self.use_ac = False
+        self.debug_texture_index = 0
         self.invert_z = True
         # Default is the orientation that matches the user-verified X-toggle alignment.
         self.flip_x = False
@@ -525,8 +588,12 @@ class GLViewer(pyglet.window.Window):
         self.mesh = build_mesh(self.samples[self.index], self.grid, self.visual_z, self.use_ac, self.invert_z, self.flip_x, self.smooth_passes)
         self.default_uv = [(23.0 / self.mesh.width) if self.cli_uv_x is None else self.cli_uv_x, self.uv_offset[1]]
         self.uv_offset[0] = self.default_uv[0]
-        image = pyglet.image.load(str(self.mesh.texture_path))
-        self.texture = image.get_texture()
+        debug_mode = DEBUG_TEXTURE_MODES[self.debug_texture_index]
+        if debug_mode == "texture":
+            image = pyglet.image.load(str(self.mesh.texture_path))
+            self.texture = image.get_texture()
+        else:
+            self.texture = image_to_texture(make_debug_texture(self.mesh.sample, self.mesh.texture_path, debug_mode))
         glBindTexture(GL_TEXTURE_2D, self.texture.id)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
@@ -577,8 +644,9 @@ class GLViewer(pyglet.window.Window):
     def update_label(self) -> None:
         assert self.mesh is not None
         tex_name = self.mesh.texture_path.name
+        debug_mode = DEBUG_TEXTURE_MODES[self.debug_texture_index]
         self.status_label.text = (
-            f"{self.mesh.sample.name}   {self.mesh.width}x{self.mesh.height}   texture={tex_name}\n"
+            f"{self.mesh.sample.name}   {self.mesh.width}x{self.mesh.height}   texture={tex_name}   view={debug_mode}\n"
             f"yaw={self.yaw:.1f}  tilt={self.tilt:.1f}  zoom={self.zoom:.2f}  z={self.visual_z:.2f}  "
             f"flipX={'on' if self.flip_x else 'off'}  smooth={self.smooth_passes}  p95={self.mesh.z95:.1f}\n"
             f"spec={self.spec_strength:.2f}  bump={self.bump_strength:.1f}  "
@@ -600,6 +668,7 @@ class GLViewer(pyglet.window.Window):
             "N / P          next previous sample\n"
             "O              open file\n"
             "T              switch texture\n"
+            "V              debug texture\n"
             "X              flip left right\n"
             "H              specular\n"
             "B              bump detail\n"
@@ -675,6 +744,10 @@ class GLViewer(pyglet.window.Window):
             self.open_file_dialog()
         elif symbol == key.T:
             self.use_ac = not self.use_ac
+            self.debug_texture_index = 0
+            self.load_current()
+        elif symbol == key.V:
+            self.debug_texture_index = (self.debug_texture_index + 1) % len(DEBUG_TEXTURE_MODES)
             self.load_current()
         elif symbol == key.X:
             self.flip_x = not self.flip_x

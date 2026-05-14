@@ -50,6 +50,7 @@ Useful controls:
 - `H`: specular
 - `B`: bump detail
 - `M`: mesh smoothing passes
+- `V`: cycle debug texture views: original texture, height color map, board mask overlay, POT RGB composite
 - `L`: light direction
 - `C`: save current alignment
 - `E`: export current depth maps
@@ -73,7 +74,21 @@ Observed `.pot` layout:
 
 The current OpenGL viewer uses `plane0` as the main height source, a companion `.jpg` as the texture, and derives a board baseline from the aligned image. The official Pemtron OCX exposes methods such as `SetFilterMode`, `SetCutOffLevel`, and `GetHeightBuffer`; those are likely relevant for matching the official renderer more closely.
 
+## Testing
+
+The tests use local samples when present, but sample files are intentionally not committed.
+
+```powershell
+python -m unittest .\test_viewer_core.py
+```
+
+Current checks cover:
+
+- `.ptt` layout parsing
+- `.pot` layout parsing
+- `flipX` preserving the height distribution
+- debug texture generation
+
 ## Repository Scope
 
 Large vendor binaries, sample data, generated renders, and debug images are intentionally ignored. Keep only source code and small project metadata in Git.
-
