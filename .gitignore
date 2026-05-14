@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated renders and debug outputs
+renders*/
+exported_depth/
+*_plane0_*.png
+*_plane0_*.npy
+debug_*.png
+ptt_*.png
+pot_*.png
+
+# AOI sample data and vendor binaries
+samples/
+Pemtron-PROJECT/
+*.ptt
+*.pot
+*.ptr
+*.pri
+*.pst
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+
+# Local calibration/runtime files
+ptt_viewer_alignment.txt
+
