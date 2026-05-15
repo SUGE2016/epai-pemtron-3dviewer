@@ -1,14 +1,8 @@
 # Bentron/Pemtron AOI PTT Viewer
 
-Utilities for exploring Bentron/Pemtron AOI 3D sample files such as `.ptt`, `.pot`, and companion `.jpg` textures.
+Utilities for inspecting Bentron/Pemtron AOI `.ptt` 3D files, companion `.pot` data, and `.jpg` textures.
 
-## Current Tools
-
-- `view_bentron_aoi_3d_gl.py`: OpenGL textured 3D viewer for `.ptt` samples.
-- `export_ptt_depth.py`: Export the raw `plane0` depth map from a `.ptt` file.
-- `render_bentron_aoi.py`: Export and inspect raw `.ptt` / `.pot` planes.
-- `render_bentron_aoi_3d.py`: Static/HTML 3D render prototype.
-- `view_bentron_aoi_3d.py`: Older software-rendered viewer kept for reference.
+The main tool is `view_bentron_aoi_3d_gl.py`, an OpenGL viewer for interactive textured 3D rendering. The current default height mode is `plane0_repair`: it preserves the observed best `plane0` geometry, repairs small `plane0` invalid holes as low surface, and keeps the `K` culling path from cutting repaired PCB holes into black gaps.
 
 ## Install
 
@@ -16,13 +10,13 @@ Utilities for exploring Bentron/Pemtron AOI 3D sample files such as `.ptt`, `.po
 python -m pip install -r requirements.txt
 ```
 
-The Codex bundled Python used during development was:
+Dependencies:
 
-```powershell
-C:\Users\sugar\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
-```
+- `numpy`
+- `Pillow`
+- `pyglet`
 
-## Run The OpenGL Viewer
+## Run
 
 Open a file picker:
 
@@ -30,65 +24,111 @@ Open a file picker:
 python .\view_bentron_aoi_3d_gl.py
 ```
 
-Open a specific sample:
+Open one file:
 
 ```powershell
 python .\view_bentron_aoi_3d_gl.py .\samples\1@206.ptt
 ```
 
-Useful controls:
+Open a folder of samples:
+
+```powershell
+python .\view_bentron_aoi_3d_gl.py .\samples
+```
+
+Useful options:
+
+```powershell
+python .\view_bentron_aoi_3d_gl.py .\samples\1@836.ptt --grid 360 --height-mode plane0_repair
+```
+
+Height modes:
+
+- `plane0`: raw primary height plane.
+- `plane0_repair`: default; `plane0` with invalid holes repaired as low surface.
+- `plane1`, `plane2`: raw secondary planes for inspection.
+- `mean`, `weighted`: experimental plane averaging.
+- `fill_min12`, `fill_qmap12`: experimental fill modes using planes 1/2.
+
+## Controls
 
 - Drag: rotate freely
 - Wheel: zoom
 - `O`: open another `.ptt`
-- `N` / `P`: next/previous sample in the same folder
+- `N` / `P`: next/previous sample in the folder
 - `+` / `-`: height display scale
-- `W/A/S/D` or arrow keys: adjust texture offset
+- `W/A/S/D` or arrow keys: texture offset
 - `U`: reset texture offset
 - `X`: flip left/right
 - `T`: switch texture
-- `H`: specular
+- `V`: debug texture view
+- `G`: height/fusion recipe
+- `K`: cull invalid faces after hole repair
+- `H`: specular strength
 - `B`: bump detail
 - `M`: mesh smoothing passes
-- `V`: cycle debug texture views: original texture, height color map, board mask overlay, POT RGB composite
 - `L`: light direction
-- `C`: save current alignment
-- `E`: export current depth maps
+- `C`: save alignment
+- `E`: export depth maps
+- `Q`: pick diagnostics for a clicked point
 - `F1`: show/hide help
 - `Esc`: close
+
+`Q` pick diagnostics export JSON, screenshot, plane patches, POT patch, and texture patch to `pick_diagnostics/`. Use this when comparing abnormal render points against raw `plane0/1/2` and `.pot` values.
 
 ## Format Notes
 
 Observed `.ptt` layout:
 
 - 76-byte header
-- 3 little-endian `uint16` planes
-- dimensions from the first two `uint32` header fields
-- pixel pitch from the following two `float32` fields
+- first two `uint32` fields are height and width
+- next two `float32` fields are pixel pitch
+- payload is 3 little-endian `uint16` planes shaped `(3, height, width)`
+- values near `65535` behave as invalid/sentinel heights
 
 Observed `.pot` layout:
 
 - 20-byte header
 - 5 planar `uint8` channels
-- header contains width, height, and pitch values
 
-The current OpenGL viewer uses `plane0` as the main height source, a companion `.jpg` as the texture, and derives a board baseline from the aligned image. The official Pemtron OCX exposes methods such as `SetFilterMode`, `SetCutOffLevel`, and `GetHeightBuffer`; those are likely relevant for matching the official renderer more closely.
+The official `PEM3DControl.ocx` can be hosted for comparison. The probe in `official_ocx_probe/` uses a minimal WinForms ActiveX host and can call methods such as `LoadFile`, `GetHeightBuffer`, `GetRealBuffer`, and `GetHeightMinMax`. The OCX is not suitable for browser rendering, but it is useful as a reference renderer.
 
-## Testing
+## OCX Probe
 
-The tests use local samples when present, but sample files are intentionally not committed.
+The probe expects the vendor files under `Pemtron-PROJECT/`, including `PEM3DControl.ocx`, `AxInterop.PEM3DControlLib.dll`, and `Interop.PEM3DControlLib.dll`.
+
+```powershell
+dotnet build .\official_ocx_probe\OfficialOcxProbe.csproj -c Release
+.\official_ocx_probe\bin\Release\net8.0-windows\win-x64\OfficialOcxProbe.exe .\samples\1@206.ptt .\official_ocx_probe\out_206
+```
+
+If COM activation fails, register the OCX/type library for the current user before running the probe.
+
+## Tests
 
 ```powershell
 python -m unittest .\test_viewer_core.py
+python -m py_compile .\view_bentron_aoi_3d_gl.py .\test_viewer_core.py
 ```
 
-Current checks cover:
+The tests use local samples when present. Sample files are intentionally ignored.
 
-- `.ptt` layout parsing
-- `.pot` layout parsing
-- `flipX` preserving the height distribution
-- debug texture generation
+## Packaging
+
+Build the standalone viewer with PyInstaller:
+
+```powershell
+pyinstaller .\Pemtron3DViewer.spec --clean --noconfirm
+```
+
+The executable is written to:
+
+```text
+dist\Pemtron3DViewer.exe
+```
+
+The packaged viewer includes a Windows native file picker fallback, so it does not require `tkinter`.
 
 ## Repository Scope
 
-Large vendor binaries, sample data, generated renders, and debug images are intentionally ignored. Keep only source code and small project metadata in Git.
+Large vendor binaries, sample data, generated renders, diagnostics, and packaged outputs are ignored. Keep source code, tests, packaging metadata, and small project files in Git.

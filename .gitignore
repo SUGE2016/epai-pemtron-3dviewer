@@ -3,10 +3,19 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+build/
+dist/
 
 # Generated renders and debug outputs
 renders*/
 exported_depth/
+diagnostics/
+pick_diagnostics/
+official_ocx_probe/bin/
+official_ocx_probe/obj/
+official_ocx_probe/out*/
+official_ocx_probe/compare/
+official_ocx_probe/*.json
 *_plane0_*.png
 *_plane0_*.npy
 debug_*.png
@@ -30,4 +39,3 @@ Pemtron-PROJECT/
 
 # Local calibration/runtime files
 ptt_viewer_alignment.txt
-

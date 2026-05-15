@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Interop.PEM3DControlLib">
+      <HintPath>..\Pemtron-PROJECT\Interop.PEM3DControlLib.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="AxInterop.PEM3DControlLib">
+      <HintPath>..\Pemtron-PROJECT\AxInterop.PEM3DControlLib.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import json
 import math
 import struct
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -59,9 +62,17 @@ class MeshData:
     header_uv_x: float
     low_clip_raw: float
     board_ref_raw: float
+    grid_width: int
+    grid_height: int
+    raw_resized: np.ndarray
+    mask_resized: np.ndarray
+    z_world: np.ndarray
 
 
 DEBUG_TEXTURE_MODES = ("texture", "height", "board", "pot")
+HEIGHT_MODES = ("plane0", "plane0_repair", "plane1", "plane2", "mean", "weighted", "fill_min12", "fill_qmap12")
+DEFAULT_HEIGHT_MODE = "plane0_repair"
+DEFAULT_HEIGHT_WEIGHTS = (1.0, 1.0, 1.0)
 
 
 def choose_texture(sample: Sample, use_ac: bool) -> Path:
@@ -91,6 +102,64 @@ def find_samples(paths: list[Path]) -> list[Sample]:
         ac = Path(str(stem) + "_AC.jpg")
         out.append(Sample(ptt.stem, ptt, jpg if jpg.exists() else None, ac if ac.exists() else None))
     return sorted(out, key=lambda sample: sample.name)
+
+
+def open_ptt_dialog() -> Path | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        selected = filedialog.askopenfilename(
+            title="Open Bentron/Pemtron PTT file",
+            filetypes=[("PTT 3D files", "*.ptt"), ("All files", "*.*")],
+        )
+        root.destroy()
+        return Path(selected).resolve() if selected else None
+    except Exception:
+        if sys.platform != "win32":
+            return None
+
+    class OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize", ctypes.c_uint32),
+            ("hwndOwner", ctypes.c_void_p),
+            ("hInstance", ctypes.c_void_p),
+            ("lpstrFilter", ctypes.c_wchar_p),
+            ("lpstrCustomFilter", ctypes.c_wchar_p),
+            ("nMaxCustFilter", ctypes.c_uint32),
+            ("nFilterIndex", ctypes.c_uint32),
+            ("lpstrFile", ctypes.c_wchar_p),
+            ("nMaxFile", ctypes.c_uint32),
+            ("lpstrFileTitle", ctypes.c_wchar_p),
+            ("nMaxFileTitle", ctypes.c_uint32),
+            ("lpstrInitialDir", ctypes.c_wchar_p),
+            ("lpstrTitle", ctypes.c_wchar_p),
+            ("Flags", ctypes.c_uint32),
+            ("nFileOffset", ctypes.c_uint16),
+            ("nFileExtension", ctypes.c_uint16),
+            ("lpstrDefExt", ctypes.c_wchar_p),
+            ("lCustData", ctypes.c_void_p),
+            ("lpfnHook", ctypes.c_void_p),
+            ("lpTemplateName", ctypes.c_wchar_p),
+            ("pvReserved", ctypes.c_void_p),
+            ("dwReserved", ctypes.c_uint32),
+            ("FlagsEx", ctypes.c_uint32),
+        ]
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    ofn = OPENFILENAMEW()
+    ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+    ofn.lpstrFilter = "PTT 3D files (*.ptt)\0*.ptt\0All files (*.*)\0*.*\0"
+    ofn.lpstrFile = ctypes.cast(buffer, ctypes.c_wchar_p)
+    ofn.nMaxFile = len(buffer)
+    ofn.lpstrTitle = "Open Bentron/Pemtron PTT file"
+    ofn.lpstrDefExt = "ptt"
+    ofn.Flags = 0x00001000 | 0x00000800 | 0x00000008
+    if ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+        return Path(buffer.value).resolve()
+    return None
 
 
 def read_ptt(path: Path) -> tuple[int, int, float, float, np.ndarray]:
@@ -190,7 +259,7 @@ def resize_float(array: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return np.asarray(Image.fromarray(safe, mode="F").resize(size, Image.Resampling.BILINEAR), dtype=np.float32)
 
 
-def fill_invalid_height(z_world: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def fill_invalid_height(z_world: np.ndarray, mask: np.ndarray, return_mask: bool = False) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     filled = z_world.copy()
     filled[~mask] = 0.0
     valid = mask.astype(np.float32)
@@ -219,7 +288,7 @@ def fill_invalid_height(z_world: np.ndarray, mask: np.ndarray) -> np.ndarray:
         valid[can_fill] = 1.0
         mask = mask | can_fill
     filled[~np.isfinite(filled)] = 0.0
-    return filled
+    return (filled, mask) if return_mask else filled
 
 
 def estimate_board_reference(valid: np.ndarray) -> float:
@@ -275,26 +344,77 @@ def image_to_texture(image: Image.Image):
     return ImageData(rgba.width, rgba.height, "RGBA", data, pitch=-rgba.width * 4).get_texture()
 
 
-def estimate_board_reference_from_texture(raw: np.ndarray, mask: np.ndarray, texture_path: Path) -> float:
-    board_mask = build_board_mask(texture_path, (raw.shape[1], raw.shape[0]), strict=True)
-    candidates = board_mask & mask
-    if candidates.any():
-        vals = raw[candidates]
-        vals = vals[vals <= np.percentile(raw[mask], 40)]
-        if vals.size >= 64:
-            hist, edges = np.histogram(vals, bins=64)
-            idx = int(hist.argmax())
-            return float((edges[idx] + edges[idx + 1]) * 0.5)
-    return estimate_board_reference(raw[mask])
+def estimate_low_surface_cap(valid: np.ndarray) -> float:
+    low_cluster = valid[valid <= np.percentile(valid, 40)]
+    if low_cluster.size < 64:
+        low_cluster = valid
+    return float(np.percentile(low_cluster, 95))
 
 
-def estimate_board_cap_from_texture(raw: np.ndarray, mask: np.ndarray, texture_path: Path) -> float | None:
-    board_mask = build_board_mask(texture_path, (raw.shape[1], raw.shape[0]), strict=True)
-    candidates = board_mask & mask
-    if candidates.sum() < 64:
-        return None
-    vals = raw[candidates]
-    return float(np.percentile(vals, 95))
+def combine_height_planes(planes: np.ndarray, weights: tuple[float, float, float]) -> tuple[np.ndarray, np.ndarray]:
+    values = planes.astype(np.float32)
+    valid = values < 60000
+    weight_array = np.asarray(weights, dtype=np.float32)[:, None, None]
+    weighted_valid = valid.astype(np.float32) * weight_array
+    denom = weighted_valid.sum(axis=0)
+    combined = np.zeros(values.shape[1:], dtype=np.float32)
+    np.divide((values * weighted_valid).sum(axis=0), denom, out=combined, where=denom > 0)
+    return combined, denom > 0
+
+
+def fill_plane0_from_min12(planes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    p0 = planes[0].astype(np.float32)
+    p1 = planes[1].astype(np.float32)
+    p2 = planes[2].astype(np.float32)
+    m0 = p0 < 60000
+    m1 = p1 < 60000
+    m2 = p2 < 60000
+    fill_value = np.minimum(np.where(m1, p1, np.inf), np.where(m2, p2, np.inf)).astype(np.float32)
+    fill = (~m0) & np.isfinite(fill_value)
+    out = p0.copy()
+    out[fill] = fill_value[fill]
+    return out, m0 | fill
+
+
+def repair_plane0_invalid_as_low_surface(planes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    p0 = planes[0].astype(np.float32)
+    m0 = p0 < 60000
+    support = (planes[1] < 60000) | (planes[2] < 60000)
+    low_surface = estimate_low_surface_cap(p0[m0])
+    fill = (~m0) & support
+    out = p0.copy()
+    out[fill] = low_surface
+    return out, m0 | fill
+
+
+def quantile_map_values(src: np.ndarray, src_ref: np.ndarray, dst_ref: np.ndarray) -> np.ndarray:
+    quantiles = np.linspace(0.0, 100.0, 257)
+    src_points = np.percentile(src_ref, quantiles)
+    dst_points = np.percentile(dst_ref, quantiles)
+    order = np.argsort(src_points)
+    src_points = src_points[order]
+    dst_points = dst_points[order]
+    keep = np.r_[True, np.diff(src_points) > 1e-6]
+    return np.interp(src, src_points[keep], dst_points[keep], left=dst_points[keep][0], right=dst_points[keep][-1]).astype(np.float32)
+
+
+def fill_plane0_from_qmap12(planes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    p0 = planes[0].astype(np.float32)
+    p1 = planes[1].astype(np.float32)
+    p2 = planes[2].astype(np.float32)
+    m0 = p0 < 60000
+    m1 = p1 < 60000
+    m2 = p2 < 60000
+    denom = m1.astype(np.float32) + m2.astype(np.float32)
+    mean12 = np.divide(p1 * m1 + p2 * m2, denom, out=np.zeros_like(p0), where=denom > 0)
+    overlap = m0 & (denom > 0)
+    if overlap.sum() < 256:
+        return fill_plane0_from_min12(planes)
+    mapped = quantile_map_values(mean12, mean12[overlap], p0[overlap])
+    fill = (~m0) & (denom > 0)
+    out = p0.copy()
+    out[fill] = mapped[fill]
+    return out, m0 | fill
 
 
 def resize_bool(array: np.ndarray, size: tuple[int, int]) -> np.ndarray:
@@ -317,10 +437,26 @@ def build_mesh(
     invert_z: bool = True,
     flip_x: bool = True,
     smooth_passes: int = 1,
+    cull_invalid_quads: bool = True,
+    height_mode: str = "plane0",
+    height_weights: tuple[float, float, float] = DEFAULT_HEIGHT_WEIGHTS,
 ) -> MeshData:
     width, height, pitch_x, pitch_y, planes = read_ptt(sample.ptt)
-    raw = planes[0].astype(np.float32)
-    mask = raw < 60000
+    plane0_raw = planes[0].astype(np.float32)
+    plane0_mask = plane0_raw < 60000
+    if height_mode in ("mean", "weighted"):
+        weights = DEFAULT_HEIGHT_WEIGHTS if height_mode == "mean" else height_weights
+        raw, mask = combine_height_planes(planes, weights)
+    elif height_mode == "plane0_repair":
+        raw, mask = repair_plane0_invalid_as_low_surface(planes)
+    elif height_mode == "fill_min12":
+        raw, mask = fill_plane0_from_min12(planes)
+    elif height_mode == "fill_qmap12":
+        raw, mask = fill_plane0_from_qmap12(planes)
+    else:
+        plane_index = ("plane0", "plane1", "plane2").index(height_mode) if height_mode in ("plane0", "plane1", "plane2") else 0
+        raw = planes[plane_index].astype(np.float32)
+        mask = raw < 60000
     valid = raw[mask]
     low_clip = float(np.percentile(valid, 10))
     high = float(np.percentile(valid, 99.5))
@@ -333,19 +469,34 @@ def build_mesh(
     mask_r = resize_bool(mask, mesh_size)
 
     texture_path = choose_texture(sample, use_ac)
-    board_ref = estimate_board_reference_from_texture(raw, mask, sample.jpg or texture_path)
-    board_cap = estimate_board_cap_from_texture(raw, mask, sample.jpg or texture_path)
+    # Anchor the low-surface calibration to plane0's valid height distribution.
+    # The rendered black artifacts are height/data anomalies, not a material
+    # color class, so JPG color masks are kept out of geometry correction.
+    board_ref = estimate_board_reference(plane0_raw[plane0_mask])
+    low_surface_cap = estimate_low_surface_cap(plane0_raw[plane0_mask])
+    height_range_cap = float(np.percentile(plane0_raw[plane0_mask], 95))
 
     if invert_z:
-        # After texture/height alignment was corrected, the board pixels in the
-        # JPG consistently map to the low-value cluster in plane0. Treat that
-        # cluster as the board baseline and lift higher raw values above it.
-        if board_cap is not None:
-            strict_board_r = build_board_mask(sample.jpg or texture_path, mesh_size, strict=True) & mask_r
-            loose_board_r = build_board_mask(sample.jpg or texture_path, mesh_size, strict=False) & mask_r
+        raw_r = raw_r.copy()
+        raw_r = np.minimum(raw_r, height_range_cap)
+        if height_mode in ("fill_min12", "fill_qmap12"):
+            fill_source = (~plane0_mask) & mask
+            fill_source_r = resize_bool(fill_source, mesh_size)
+            low_surface_r = resize_bool(plane0_mask & (plane0_raw <= low_surface_cap), mesh_size)
+            padded_low = np.pad(low_surface_r, ((1, 1), (1, 1)), mode="edge")
+            near_low_surface = (
+                padded_low[:-2, 1:-1]
+                | padded_low[2:, 1:-1]
+                | padded_low[1:-1, :-2]
+                | padded_low[1:-1, 2:]
+                | padded_low[1:-1, 1:-1]
+            )
+            repair_low_surface = fill_source_r & near_low_surface
             raw_r = raw_r.copy()
-            raw_r[strict_board_r] = np.minimum(raw_r[strict_board_r], board_cap)
-            raw_r[loose_board_r] = np.minimum(raw_r[loose_board_r], board_cap)
+            # The official OCX reports max height close to plane0's p95 for
+            # tested samples. Keep repaired plane1/2 holes inside that range
+            # so their long-tail outliers do not become isolated spikes.
+            raw_r[repair_low_surface] = np.minimum(raw_r[repair_low_surface], low_surface_cap)
         raw_delta = np.clip(raw_r - board_ref, 0.0, None)
         raw_delta[~mask_r] = 0.0
     else:
@@ -354,7 +505,7 @@ def build_mesh(
         board_ref = baseline
 
     z_world = (raw_delta / max(1e-6, (pitch_x + pitch_y) * 0.5)).astype(np.float32)
-    z_world = fill_invalid_height(z_world, mask_r)
+    z_world, render_mask_r = fill_invalid_height(z_world, mask_r, return_mask=True)
     for _ in range(max(0, smooth_passes)):
         z_world = median_filter2d(z_world, 3)
     # In the viewer camera convention, negative Z protrudes toward the user.
@@ -389,6 +540,13 @@ def build_mesh(
     indices: list[int] = []
     for row in range(h - 1):
         for col in range(w - 1):
+            if cull_invalid_quads and not (
+                render_mask_r[row, col]
+                and render_mask_r[row + 1, col]
+                and render_mask_r[row, col + 1]
+                and render_mask_r[row + 1, col + 1]
+            ):
+                continue
             a = row * w + col
             b = a + 1
             c = a + w
@@ -409,6 +567,11 @@ def build_mesh(
         read_header_uv_x(sample.ptt, width),
         low_clip,
         board_ref,
+        w,
+        h,
+        raw_r.copy(),
+        render_mask_r.copy(),
+        z_world.copy(),
     )
 
 
@@ -528,7 +691,15 @@ void main()
 
 
 class GLViewer(pyglet.window.Window):
-    def __init__(self, samples: list[Sample], grid: int, visual_z: float, uv_offset: tuple[float | None, float]) -> None:
+    def __init__(
+        self,
+        samples: list[Sample],
+        grid: int,
+        visual_z: float,
+        uv_offset: tuple[float | None, float],
+        height_weights: tuple[float, float, float],
+        height_mode: str,
+    ) -> None:
         super().__init__(1280, 900, "Bentron AOI OpenGL 3D Viewer", resizable=True)
         self.samples = samples
         self.grid = grid
@@ -546,11 +717,15 @@ class GLViewer(pyglet.window.Window):
         self.bump_strength = 4.5
         self.light_yaw = 0.0
         self.smooth_passes = 1
+        self.cull_invalid_quads = True
+        self.height_mode_index = HEIGHT_MODES.index(height_mode)
+        self.height_weights = height_weights
         self.cli_uv_x = uv_offset[0]
         self.uv_offset = [0.0, uv_offset[1]]
         self.default_uv = [0.0, uv_offset[1]]
         self.last: tuple[int, int] | None = None
         self.help_visible = True
+        self.pick_mode = False
         self.program = ShaderProgram(Shader(VERTEX_SHADER, "vertex"), Shader(FRAGMENT_SHADER, "fragment"))
         self.batch = pyglet.graphics.Batch()
         self.mesh: MeshData | None = None
@@ -585,7 +760,18 @@ class GLViewer(pyglet.window.Window):
         self.load_current()
 
     def load_current(self) -> None:
-        self.mesh = build_mesh(self.samples[self.index], self.grid, self.visual_z, self.use_ac, self.invert_z, self.flip_x, self.smooth_passes)
+        self.mesh = build_mesh(
+            self.samples[self.index],
+            self.grid,
+            self.visual_z,
+            self.use_ac,
+            self.invert_z,
+            self.flip_x,
+            self.smooth_passes,
+            self.cull_invalid_quads,
+            HEIGHT_MODES[self.height_mode_index],
+            self.height_weights,
+        )
         self.default_uv = [(23.0 / self.mesh.width) if self.cli_uv_x is None else self.cli_uv_x, self.uv_offset[1]]
         self.uv_offset[0] = self.default_uv[0]
         debug_mode = DEBUG_TEXTURE_MODES[self.debug_texture_index]
@@ -612,20 +798,10 @@ class GLViewer(pyglet.window.Window):
         self.update_label()
 
     def open_file_dialog(self) -> None:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        selected = filedialog.askopenfilename(
-            title="Open Bentron/Pemtron PTT file",
-            filetypes=[("PTT 3D files", "*.ptt"), ("All files", "*.*")],
-        )
-        root.destroy()
-        if not selected:
+        selected_path = open_ptt_dialog()
+        if selected_path is None:
             return
 
-        selected_path = Path(selected).resolve()
         samples = find_samples([selected_path.parent])
         if not samples:
             self.status_label.text = f"No .ptt samples found in {selected_path.parent}"
@@ -648,7 +824,9 @@ class GLViewer(pyglet.window.Window):
         self.status_label.text = (
             f"{self.mesh.sample.name}   {self.mesh.width}x{self.mesh.height}   texture={tex_name}   view={debug_mode}\n"
             f"yaw={self.yaw:.1f}  tilt={self.tilt:.1f}  zoom={self.zoom:.2f}  z={self.visual_z:.2f}  "
-            f"flipX={'on' if self.flip_x else 'off'}  smooth={self.smooth_passes}  p95={self.mesh.z95:.1f}\n"
+            f"flipX={'on' if self.flip_x else 'off'}  cull={'on' if self.cull_invalid_quads else 'off'}  "
+            f"height={HEIGHT_MODES[self.height_mode_index]}  smooth={self.smooth_passes}  "
+            f"pick={'on' if self.pick_mode else 'off'}  p95={self.mesh.z95:.1f}\n"
             f"spec={self.spec_strength:.2f}  bump={self.bump_strength:.1f}  "
             f"uv=({self.uv_offset[0]:+.3f},{self.uv_offset[1]:+.3f})  "
             f"hdrX={self.mesh.header_uv_x:+.3f}  lowClip={self.mesh.low_clip_raw:.1f}  boardRef={self.mesh.board_ref_raw:.1f}"
@@ -670,6 +848,9 @@ class GLViewer(pyglet.window.Window):
             "T              switch texture\n"
             "V              debug texture\n"
             "X              flip left right\n"
+            "K              cull invalid faces\n"
+            "G              height/fusion recipe\n"
+            "Q              pick diagnostics\n"
             "H              specular\n"
             "B              bump detail\n"
             "M              mesh smoothing\n"
@@ -709,6 +890,9 @@ class GLViewer(pyglet.window.Window):
         glEnable(GL_DEPTH_TEST)
 
     def on_mouse_press(self, x: int, y: int, button: int, modifiers: int) -> None:
+        if self.pick_mode:
+            self.export_pick_diagnostic(x, y)
+            return
         self.last = (x, y)
 
     def on_mouse_release(self, x: int, y: int, button: int, modifiers: int) -> None:
@@ -725,6 +909,118 @@ class GLViewer(pyglet.window.Window):
 
     def on_mouse_scroll(self, x: int, y: int, scroll_x: float, scroll_y: float) -> None:
         self.zoom = min(4.0, max(0.25, self.zoom * (1.1 if scroll_y > 0 else 0.9)))
+
+    def project_vertices_to_screen(self) -> np.ndarray:
+        assert self.mesh is not None
+        p = self.mesh.vertices.astype(np.float32)
+        yaw = math.radians(self.yaw)
+        tilt = math.radians(self.tilt)
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        ct, st = math.cos(tilt), math.sin(tilt)
+        x1 = p[:, 0] * cy - p[:, 1] * sy
+        y1 = p[:, 0] * sy + p[:, 1] * cy
+        z1 = p[:, 2]
+        x2 = x1
+        y2 = y1 * ct - z1 * st
+        max_dim = max(np.ptp(p[:, 0]), np.ptp(p[:, 1]), np.ptp(p[:, 2]))
+        scene_scale = 1.55 / max(1.0, max_dim)
+        aspect = self.width / max(1, self.height)
+        ndc_x = x2 * scene_scale * self.zoom / aspect
+        ndc_y = y2 * scene_scale * self.zoom
+        return np.column_stack([(ndc_x * 0.5 + 0.5) * self.width, (ndc_y * 0.5 + 0.5) * self.height])
+
+    def export_pick_diagnostic(self, x: int, y: int) -> None:
+        assert self.mesh is not None
+        screen = self.project_vertices_to_screen()
+        dist2 = (screen[:, 0] - x) ** 2 + (screen[:, 1] - y) ** 2
+        vertex_index = int(np.argmin(dist2))
+        row = vertex_index // self.mesh.grid_width
+        col = vertex_index % self.mesh.grid_width
+        src_x = int(round(col * (self.mesh.width - 1) / max(1, self.mesh.grid_width - 1)))
+        src_y = int(round(row * (self.mesh.height - 1) / max(1, self.mesh.grid_height - 1)))
+
+        width, height, _pitch_x, _pitch_y, planes = read_ptt(self.mesh.sample.ptt)
+        pot = read_pot(self.mesh.sample.ptt.with_suffix(".pot"))
+        radius = 16
+        y0, y1 = max(0, src_y - radius), min(height, src_y + radius + 1)
+        x0, x1 = max(0, src_x - radius), min(width, src_x + radius + 1)
+        out_dir = Path.cwd() / "pick_diagnostics"
+        out_dir.mkdir(exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        prefix = out_dir / f"{self.mesh.sample.name}_{stamp}_x{src_x}_y{src_y}"
+
+        plane_values = [int(planes[i, src_y, src_x]) for i in range(3)]
+        patch_paths: dict[str, str] = {}
+        for i in range(3):
+            patch = planes[i, y0:y1, x0:x1].astype(np.float32)
+            valid = patch < 60000
+            gray = normalize_to_u8(patch, valid)
+            gray[~valid] = 0
+            path = prefix.with_name(prefix.name + f"_plane{i}.png")
+            Image.fromarray(colorize_depth(gray), mode="RGB").save(path)
+            patch_paths[f"plane{i}"] = str(path)
+
+        if pot is not None:
+            _pot_w, _pot_h, pot_planes = pot
+            pot_patch = np.dstack([pot_planes[0, y0:y1, x0:x1], pot_planes[2, y0:y1, x0:x1], pot_planes[4, y0:y1, x0:x1]]).astype(np.uint8)
+            path = prefix.with_name(prefix.name + "_pot.png")
+            Image.fromarray(pot_patch, mode="RGB").save(path)
+            patch_paths["pot"] = str(path)
+
+        texture = Image.open(self.mesh.texture_path).convert("RGB")
+        tex_x = int(np.clip(round((self.mesh.texcoords[vertex_index, 0] + self.uv_offset[0]) * (texture.width - 1)), 0, texture.width - 1))
+        tex_y = int(np.clip(round((1.0 - (self.mesh.texcoords[vertex_index, 1] + self.uv_offset[1])) * (texture.height - 1)), 0, texture.height - 1))
+        texture_patch = texture.crop((max(0, tex_x - radius), max(0, tex_y - radius), min(texture.width, tex_x + radius + 1), min(texture.height, tex_y + radius + 1)))
+        texture_path = prefix.with_name(prefix.name + "_texture.png")
+        texture_patch.save(texture_path)
+        patch_paths["texture"] = str(texture_path)
+
+        screenshot_path = prefix.with_name(prefix.name + "_screen.png")
+        pyglet.image.get_buffer_manager().get_color_buffer().save(str(screenshot_path))
+
+        info = {
+            "sample": self.mesh.sample.name,
+            "height_mode": HEIGHT_MODES[self.height_mode_index],
+            "screen": {"x": x, "y": y},
+            "nearest_screen": {"x": float(screen[vertex_index, 0]), "y": float(screen[vertex_index, 1]), "distance_px": float(math.sqrt(dist2[vertex_index]))},
+            "mesh": {
+                "vertex_index": vertex_index,
+                "row": row,
+                "col": col,
+                "grid_width": self.mesh.grid_width,
+                "grid_height": self.mesh.grid_height,
+                "position": self.mesh.vertices[vertex_index].astype(float).tolist(),
+                "normal": self.mesh.normals[vertex_index].astype(float).tolist(),
+                "uv": self.mesh.texcoords[vertex_index].astype(float).tolist(),
+                "raw_resized": float(self.mesh.raw_resized[row, col]),
+                "mask_resized": bool(self.mesh.mask_resized[row, col]),
+                "z_world": float(self.mesh.z_world[row, col]),
+            },
+            "source_pixel": {
+                "x": src_x,
+                "y": src_y,
+                "plane0": plane_values[0],
+                "plane1": plane_values[1],
+                "plane2": plane_values[2],
+                "plane_valid": [value < 60000 for value in plane_values],
+                "pot": None if pot is None else [int(pot[2][i, src_y, src_x]) for i in range(pot[2].shape[0])],
+            },
+            "view": {
+                "yaw": self.yaw,
+                "tilt": self.tilt,
+                "zoom": self.zoom,
+                "visual_z": self.visual_z,
+                "flip_x": self.flip_x,
+                "cull_invalid_quads": self.cull_invalid_quads,
+                "uv_offset": self.uv_offset,
+                "texture": str(self.mesh.texture_path),
+            },
+            "patch_bounds": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
+            "files": {**patch_paths, "screenshot": str(screenshot_path)},
+        }
+        json_path = prefix.with_suffix(".json")
+        json_path.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.status_label.text = f"Pick exported:\n{json_path.name}\nsource=({src_x},{src_y}) planes={plane_values}"
 
     def on_key_press(self, symbol: int, modifiers: int) -> None:
         key = pyglet.window.key
@@ -752,6 +1048,15 @@ class GLViewer(pyglet.window.Window):
         elif symbol == key.X:
             self.flip_x = not self.flip_x
             self.load_current()
+        elif symbol == key.K:
+            self.cull_invalid_quads = not self.cull_invalid_quads
+            self.load_current()
+        elif symbol == key.G:
+            self.height_mode_index = (self.height_mode_index + 1) % len(HEIGHT_MODES)
+            self.load_current()
+        elif symbol == key.Q:
+            self.pick_mode = not self.pick_mode
+            self.update_label()
         elif symbol == key.H:
             self.spec_strength = 0.15 if self.spec_strength > 0.75 else self.spec_strength + 0.30
             self.update_label()
@@ -821,23 +1126,15 @@ def main() -> None:
     parser.add_argument("--visual-z", type=float, default=0.65)
     parser.add_argument("--uv-x", type=float, default=None, help="Initial texture U offset. Defaults to PTT header registration.")
     parser.add_argument("--uv-y", type=float, default=0.0, help="Initial texture V offset. Positive moves texture up.")
+    parser.add_argument("--height-mode", choices=HEIGHT_MODES, default=DEFAULT_HEIGHT_MODE, help="Initial height/fusion recipe.")
+    parser.add_argument("--height-weights", default="1,1,1", help="Weights for experimental weighted height mode, as w0,w1,w2.")
     args = parser.parse_args()
 
     paths = args.paths
     if not paths:
-        import tkinter as tk
-        from tkinter import filedialog, messagebox
-
-        root = tk.Tk()
-        root.withdraw()
-        selected = filedialog.askopenfilename(
-            title="Open Bentron/Pemtron PTT file",
-            filetypes=[("PTT 3D files", "*.ptt"), ("All files", "*.*")],
-        )
-        root.destroy()
-        if not selected:
+        selected_path = open_ptt_dialog()
+        if selected_path is None:
             return
-        selected_path = Path(selected)
         paths = [selected_path.parent]
         initial_name = selected_path.stem
     else:
@@ -846,17 +1143,19 @@ def main() -> None:
     samples = find_samples(paths)
     if not samples:
         if getattr(sys, "frozen", False):
-            import tkinter as tk
-            from tkinter import messagebox
-
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror("PTT Viewer", "No .ptt samples found.")
-            root.destroy()
+            print("No .ptt samples found.")
             return
         raise SystemExit("No .ptt samples found.")
 
-    viewer = GLViewer(samples, args.grid, args.visual_z, (args.uv_x, args.uv_y))
+    try:
+        weights = tuple(float(part.strip()) for part in args.height_weights.split(","))
+        if len(weights) != 3:
+            raise ValueError
+        height_weights = (weights[0], weights[1], weights[2])
+    except ValueError:
+        raise SystemExit("--height-weights must be three comma-separated numbers, e.g. 1,1,1")
+
+    viewer = GLViewer(samples, args.grid, args.visual_z, (args.uv_x, args.uv_y), height_weights, args.height_mode)
     if initial_name:
         for index, sample in enumerate(samples):
             if sample.name == initial_name:

@@ -46,6 +46,35 @@ class ViewerCoreTests(unittest.TestCase):
         flipped = viewer.build_mesh(sample, grid=180, visual_z=0.65, flip_x=True)
         np.testing.assert_allclose(np.sort(normal.vertices[:, 2]), np.sort(flipped.vertices[:, 2]))
 
+    def test_invalid_quad_culling_removes_faces_only(self) -> None:
+        path = self.require_sample("1@206")
+        sample = viewer.find_samples([path])[0]
+        culled = viewer.build_mesh(sample, grid=180, visual_z=0.65, cull_invalid_quads=True)
+        unculled = viewer.build_mesh(sample, grid=180, visual_z=0.65, cull_invalid_quads=False)
+        self.assertEqual(culled.vertices.shape, unculled.vertices.shape)
+        self.assertLessEqual(culled.indices.size, unculled.indices.size)
+
+    def test_invalid_height_fill_returns_repaired_mask(self) -> None:
+        z = np.zeros((5, 5), dtype=np.float32)
+        z[2, 1] = 4.0
+        z[1, 2] = 4.0
+        z[2, 3] = 4.0
+        z[3, 2] = 4.0
+        mask = np.zeros((5, 5), dtype=bool)
+        mask[2, 1] = mask[1, 2] = mask[2, 3] = mask[3, 2] = True
+        filled, repaired = viewer.fill_invalid_height(z, mask, return_mask=True)
+        self.assertTrue(repaired[2, 2])
+        self.assertGreater(filled[2, 2], 0.0)
+
+    def test_plane0_repair_fills_invalid_with_low_surface(self) -> None:
+        planes = np.full((3, 9, 9), 100, dtype=np.uint16)
+        planes[0, 4, 4] = 65535
+        planes[1, 4, 4] = 20000
+        planes[2, 4, 4] = 30000
+        repaired, mask = viewer.repair_plane0_invalid_as_low_surface(planes)
+        self.assertTrue(mask[4, 4])
+        self.assertLess(repaired[4, 4], 1000)
+
     def test_debug_textures_have_rgb_output(self) -> None:
         path = self.require_sample("1@836")
         sample = viewer.find_samples([path])[0]
@@ -59,4 +88,3 @@ class ViewerCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
