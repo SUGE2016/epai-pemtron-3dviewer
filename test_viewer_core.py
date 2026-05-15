@@ -85,6 +85,14 @@ class ViewerCoreTests(unittest.TestCase):
             self.assertGreater(image.width, 0)
             self.assertGreater(image.height, 0)
 
+    def test_mesh_height_texture_matches_mesh_grid(self) -> None:
+        path = self.require_sample("1@206")
+        sample = viewer.find_samples([path])[0]
+        mesh = viewer.build_mesh(sample, grid=180, visual_z=0.65)
+        image = viewer.make_mesh_height_texture(mesh)
+        self.assertEqual(image.mode, "RGB")
+        self.assertEqual(image.size, (mesh.grid_width, mesh.grid_height))
+
 
 if __name__ == "__main__":
     unittest.main()

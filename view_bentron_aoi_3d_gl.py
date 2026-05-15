@@ -338,6 +338,12 @@ def make_debug_texture(sample: Sample, texture_path: Path, mode: str) -> Image.I
     return Image.open(texture_path).convert("RGB")
 
 
+def make_mesh_height_texture(mesh: MeshData) -> Image.Image:
+    gray = normalize_to_u8(mesh.z_world, mesh.mask_resized)
+    gray[~mesh.mask_resized] = 0
+    return Image.fromarray(colorize_depth(gray), mode="RGB")
+
+
 def image_to_texture(image: Image.Image):
     rgba = image.convert("RGBA")
     data = rgba.tobytes()
@@ -778,6 +784,8 @@ class GLViewer(pyglet.window.Window):
         if debug_mode == "texture":
             image = pyglet.image.load(str(self.mesh.texture_path))
             self.texture = image.get_texture()
+        elif debug_mode == "height":
+            self.texture = image_to_texture(make_mesh_height_texture(self.mesh))
         else:
             self.texture = image_to_texture(make_debug_texture(self.mesh.sample, self.mesh.texture_path, debug_mode))
         glBindTexture(GL_TEXTURE_2D, self.texture.id)
@@ -879,7 +887,8 @@ class GLViewer(pyglet.window.Window):
         self.program["specStrength"] = self.spec_strength
         self.program["bumpStrength"] = self.bump_strength
         self.program["lightYaw"] = math.radians(self.light_yaw)
-        self.program["uvOffset"] = tuple(self.uv_offset)
+        debug_mode = DEBUG_TEXTURE_MODES[self.debug_texture_index]
+        self.program["uvOffset"] = (0.0, 0.0) if debug_mode == "height" else tuple(self.uv_offset)
         self.program["tex0"] = 0
         glBindTexture(GL_TEXTURE_2D, self.texture.id)
         self.batch.draw()

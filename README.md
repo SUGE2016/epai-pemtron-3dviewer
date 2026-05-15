@@ -61,7 +61,7 @@ Height modes:
 - `U`: reset texture offset
 - `X`: flip left/right
 - `T`: switch texture
-- `V`: debug texture view
+- `V`: debug texture view. The `height` view shows the current mesh height actually used for 3D rendering, after repair/capping/resizing.
 - `G`: height/fusion recipe
 - `K`: cull invalid faces after hole repair
 - `H`: specular strength
