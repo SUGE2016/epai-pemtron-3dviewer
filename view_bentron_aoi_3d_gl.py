@@ -82,6 +82,33 @@ def choose_texture(sample: Sample, use_ac: bool) -> Path:
     return texture_path
 
 
+def missing_texture_message(sample: Sample) -> str:
+    stem = sample.ptt.with_suffix("")
+    return (
+        f"{sample.name}: missing JPG texture.\n\n"
+        f"Expected one of:\n"
+        f"  {stem.with_suffix('.jpg')}\n"
+        f"  {Path(str(stem) + '_AC.jpg')}"
+    )
+
+
+def show_error(title: str, message: str) -> None:
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
+            return
+        except Exception:
+            pass
+    print(f"{title}: {message}", file=sys.stderr)
+
+
+def require_texture(sample: Sample) -> bool:
+    if sample.jpg is not None or sample.ac_jpg is not None:
+        return True
+    show_error("PTT Viewer", missing_texture_message(sample))
+    return False
+
+
 def find_samples(paths: list[Path]) -> list[Sample]:
     ptts: list[Path] = []
     for path in paths:
@@ -705,12 +732,13 @@ class GLViewer(pyglet.window.Window):
         uv_offset: tuple[float | None, float],
         height_weights: tuple[float, float, float],
         height_mode: str,
+        initial_index: int = 0,
     ) -> None:
         super().__init__(1280, 900, "Bentron AOI OpenGL 3D Viewer", resizable=True)
         self.samples = samples
         self.grid = grid
         self.visual_z = visual_z
-        self.index = 0
+        self.index = initial_index
         self.use_ac = False
         self.debug_texture_index = 0
         self.invert_z = True
@@ -821,6 +849,8 @@ class GLViewer(pyglet.window.Window):
             if sample.ptt.resolve() == selected_path:
                 self.index = idx
                 break
+        if not require_texture(samples[self.index]):
+            return
         self.cli_uv_x = None
         self.use_ac = False
         self.load_current()
@@ -1152,7 +1182,7 @@ def main() -> None:
     samples = find_samples(paths)
     if not samples:
         if getattr(sys, "frozen", False):
-            print("No .ptt samples found.")
+            show_error("PTT Viewer", "No .ptt samples found.")
             return
         raise SystemExit("No .ptt samples found.")
 
@@ -1164,13 +1194,16 @@ def main() -> None:
     except ValueError:
         raise SystemExit("--height-weights must be three comma-separated numbers, e.g. 1,1,1")
 
-    viewer = GLViewer(samples, args.grid, args.visual_z, (args.uv_x, args.uv_y), height_weights, args.height_mode)
+    initial_index = 0
     if initial_name:
         for index, sample in enumerate(samples):
             if sample.name == initial_name:
-                viewer.index = index
-                viewer.load_current()
+                initial_index = index
                 break
+    if not require_texture(samples[initial_index]):
+        return
+
+    viewer = GLViewer(samples, args.grid, args.visual_z, (args.uv_x, args.uv_y), height_weights, args.height_mode, initial_index)
     pyglet.app.run()
 
 

@@ -1,6 +1,6 @@
 # Bentron/Pemtron AOI PTT Viewer
 
-Utilities for inspecting Bentron/Pemtron AOI `.ptt` 3D files, companion `.pot` data, and `.jpg` textures.
+Utilities for inspecting Bentron/Pemtron AOI `.ptt` 3D files, companion `.pot` data, and required `.jpg` textures.
 
 The main tool is `view_bentron_aoi_3d_gl.py`, an OpenGL viewer for interactive textured 3D rendering. The current default height mode is `plane0_repair`: it preserves the observed best `plane0` geometry, repairs small `plane0` invalid holes as low surface, and keeps the `K` culling path from cutting repaired PCB holes into black gaps.
 
@@ -29,6 +29,13 @@ Open one file:
 ```powershell
 python .\view_bentron_aoi_3d_gl.py .\samples\1@206.ptt
 ```
+
+Each `.ptt` must have a companion texture next to it:
+
+- `sample.jpg`
+- or `sample_AC.jpg`
+
+The `.ptt` files observed so far contain only a header plus 3 height planes, with no embedded texture payload. If neither JPG exists, the viewer reports a missing texture error instead of opening a partial render.
 
 Open a folder of samples:
 
