@@ -1,0 +1,66 @@
+name: Build and Release Pemtron3DViewer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to create, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build Pemtron3DViewer.exe and publish release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build Pemtron3DViewer.exe
+        shell: pwsh
+        run: |
+          pyinstaller .\Pemtron3DViewer.spec --clean --noconfirm
+          if (-not (Test-Path .\dist\Pemtron3DViewer.exe)) {
+            throw "Expected build output not found: dist\Pemtron3DViewer.exe"
+          }
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "tag=${{ inputs.tag_name }}" >> $env:GITHUB_OUTPUT
+          } else {
+            "tag=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Create GitHub Release and upload exe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          gh release create $env:RELEASE_TAG .\dist\Pemtron3DViewer.exe `
+            --repo ${{ github.repository }} `
+            --title "Pemtron3DViewer $env:RELEASE_TAG" `
+            --notes "Automated Windows build for Pemtron3DViewer.exe." `
+            --latest
